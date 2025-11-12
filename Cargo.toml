@@ -1,0 +1,15 @@
+[package]
+name = "rustyrag"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+candle-core = "0.9.1"
+clap = { version = "4.5.51", features = ["derive"] }
+lopdf = "0.38.0"
+qdrant-client = "1.15.0"
+reqwest = "0.12.24"
+serde = "1.0.228"
+text-splitter = { version = "0.28.0", features = ["tokenizers"] }
+tokenizers = { version = "0.22.1", features = ["http"] }
+tokio = "1.48.0"

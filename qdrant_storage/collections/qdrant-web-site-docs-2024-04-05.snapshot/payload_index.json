@@ -1,0 +1,1 @@
+{"schema":{"text":{"type":"text","tokenizer":"prefix","min_token_len":1,"max_token_len":20,"lowercase":true},"tag":"keyword","sections":"keyword"}}
