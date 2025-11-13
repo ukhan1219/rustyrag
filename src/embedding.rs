@@ -14,7 +14,30 @@ pub fn embed_text(text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let model_file = repo.get("model.safetensors")?;
     let tokenizer_file = repo.get("tokenizer.json")?;
     
-    let device = Device::Cpu; // or Device::cuda_if_available(0)? for GPU
+    // Try to use GPU if available (CUDA), otherwise fall back to CPU
+    let device = match Device::cuda_if_available(0) {
+        Ok(device) => {
+            // Verify it's actually a CUDA device
+            match &device {
+                Device::Cuda(_) => {
+                    println!("✓ Using CUDA GPU for embeddings");
+                    device
+                }
+                Device::Cpu => {
+                    eprintln!("cuda_if_available returned CPU device, using CPU for embeddings");
+                    Device::Cpu
+                }
+                Device::Metal(_) => {
+                    eprintln!("cuda_if_available returned Metal device, using CPU for embeddings (CUDA not available)");
+                    Device::Cpu
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Using CPU for embeddings (CUDA not available: {})", e);
+            Device::Cpu
+        }
+    };
     
     // Load tokenizer
     let mut tokenizer = tokenizers::Tokenizer::from_file(tokenizer_file).map_err(E::msg)?;

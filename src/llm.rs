@@ -70,7 +70,43 @@ pub fn generate_answer(
     println!("Loading model: {}...", model_name);
     println!("Note: This will download the model on first run (may take a while)");
     
-    let device = Device::Cpu;
+    // Try to use GPU if available (CUDA), otherwise fall back to CPU
+    let device = match Device::cuda_if_available(0) {
+        Ok(device) => {
+            // Verify it's actually a CUDA device
+            match &device {
+                Device::Cuda(_) => {
+                    println!("✓ Using CUDA GPU for LLM");
+                    device
+                }
+                Device::Cpu => {
+                    eprintln!("cuda_if_available returned CPU device, using CPU for LLM");
+                    Device::Cpu
+                }
+                Device::Metal(_) => {
+                    eprintln!("cuda_if_available returned Metal device, using CPU for LLM (CUDA not available)");
+                    Device::Cpu
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Using CPU for LLM (CUDA not available: {})", e);
+            Device::Cpu
+        }
+    };
+    
+    // Add a small test operation to verify GPU is working
+    if matches!(device, Device::Cuda(_)) {
+        match Tensor::zeros((1, 1), DType::F32, &device) {
+            Ok(_t) => {
+                println!("✓ GPU tensor creation successful - GPU is active");
+            }
+            Err(e) => {
+                eprintln!("Warning: GPU tensor creation failed: {}, GPU may not be working properly", e);
+                // Note: We can't change device here, but at least we've warned the user
+            }
+        }
+    }
     
     // Get token from environment
     let token = std::env::var("HF_TOKEN")
@@ -171,12 +207,19 @@ pub fn generate_answer(
     
     // Truncate to fit within model's context window
     // Reserve some tokens for generation (e.g., 512 tokens)
+    // Also limit prompt size to avoid GPU OOM - use a sliding window of recent context
     let reserved_for_generation = 512;
     let max_prompt_tokens = max_position_embeddings.saturating_sub(reserved_for_generation);
     
-    if token_ids.len() > max_prompt_tokens {
-        println!("Warning: Prompt is {} tokens, truncating to {} tokens", token_ids.len(), max_prompt_tokens);
-        token_ids.truncate(max_prompt_tokens);
+    // Limit to 2048 tokens to avoid GPU memory issues
+    let max_prompt_for_memory = 2048.min(max_prompt_tokens);
+    
+    if token_ids.len() > max_prompt_for_memory {
+        println!("Warning: Prompt is {} tokens, truncating to {} tokens to avoid GPU OOM", 
+                 token_ids.len(), max_prompt_for_memory);
+        // Keep the end of the prompt (most recent context) rather than the beginning
+        let start_idx = token_ids.len().saturating_sub(max_prompt_for_memory);
+        token_ids = token_ids[start_idx..].to_vec();
     }
     
     println!("Prompt tokens: {} (max: {})", token_ids.len(), max_position_embeddings);
@@ -185,24 +228,30 @@ pub fn generate_answer(
     // Convert prompt tokens to tensor: [batch_size, seq_len]
     let input_tensor = Tensor::new(&token_ids[..], &device)?.unsqueeze(0)?;
     
-    // Process the entire prompt through the model
-    // Qwen2's forward takes seqlen_offset and attention_mask, returns [batch, vocab_size] (already extracts last token)
+    // Process the entire prompt through the model to populate KV cache
+    // Qwen2's forward takes seqlen_offset and attention_mask, returns [batch, vocab_size] (logits for last token)
     let seq_len = token_ids.len();
+    let prompt_start = std::time::Instant::now();
     let logits = model.forward(&input_tensor, 0, None)?;
+    let prompt_time = prompt_start.elapsed();
+    println!("Prompt processing time: {:.2}s", prompt_time.as_secs_f64());
     
     // Extract logits for the batch: [batch, vocab_size] -> [vocab_size]
     // Qwen2's forward already returns logits for the last token position
     let mut last_logits = logits.i((0, ..))?;
     
-    // Autoregressive generation
+    // Autoregressive generation using KV cache
     let mut generated_tokens = Vec::new();
     let max_new_tokens = 256; // Reduced for faster testing
     let temperature = 0.7;
     let mut seqlen_offset = seq_len; // Track position for KV cache
     
     println!("Starting generation (max {} tokens)...", max_new_tokens);
+    println!("Note: To verify GPU usage, run 'nvidia-smi' in another terminal");
     
-    // Generate new tokens
+    let gen_start_time = std::time::Instant::now();
+    
+    // Generate new tokens using KV cache
     for step in 0..max_new_tokens {
         // Sample next token from the current logits
         let next_token = sample_token(&last_logits, temperature)?;
@@ -216,6 +265,7 @@ pub fn generate_answer(
         generated_tokens.push(next_token);
         
         // Use the newly generated token as input for next iteration
+        // The model's KV cache should maintain state from previous tokens
         let next_input = Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
         let next_logits = model.forward(&next_input, seqlen_offset, None)?;
         
@@ -235,6 +285,11 @@ pub fn generate_answer(
     if generated_tokens.len() >= max_new_tokens {
         println!("\nGenerated {} tokens (reached max)", generated_tokens.len());
     }
+    
+    let gen_time = gen_start_time.elapsed();
+    println!("Generation time: {:.2}s ({:.2} tokens/sec)", 
+             gen_time.as_secs_f64(),
+             generated_tokens.len() as f64 / gen_time.as_secs_f64());
     
     println!("\nDecoding {} tokens...", generated_tokens.len());
     

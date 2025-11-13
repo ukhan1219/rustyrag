@@ -3,6 +3,10 @@ name = "rustyrag"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
 [dependencies]
 candle-core = "0.9.1"
 candle-nn = "0.9.1"
